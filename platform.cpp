@@ -1,80 +1,38 @@
 #include <Windows.h>
-#include <stdint.h>
-#include "game.h"
-
-// -----
-// types
-// -----
+#include "platform_interface.h"
 
 
-// -------
-// globals
-// -------
-struct
+static bool GlobalRunning;
+static i32 MonitorRefreshHz = 30;
+static f32 GameUpdateHz = ((f32) MonitorRefreshHz);
+offscreen_buffer GlobalBackBuffer;
+static LARGE_INTEGER PerfCounterFrequency;
+static LARGE_INTEGER LastCounter;
+
+
+void
+ResizeBackBuffer(offscreen_buffer *Buffer,
+                 i32 NewWidth, i32 NewHeight)
 {
-    int WindowWidth;
-    int WindowHeight;
-    HWND Window;
-} GlobalState;
-
-struct
-{
-    struct {
-	    BITMAPINFO Info;
-	    void *Memory;
-	    int Width;  // in pixels
-	    int Height; // in pixels
-	    int BytesPerPixel;
-	    int Pitch;  // bytes per row
-	} BackBuffer;
-} GlobalResources;
-
-
-// ---------
-// functions
-// ---------
-static void
-UpdateWindowFromBuffer()
-{
-    offscreen_buffer *Buffer = &GlobalResources.BackBuffer;
-    HDC DevContext = GetDC(GlobalState.Window);
-    int OffsetX = 10;
-    int OffsetY = 10;
-
-    PatBlt(GlobalState.DevContext, 0, 0, GlobalState.WindowWidth, OffsetY, BLACKNESS);
-    PatBlt(GlobalState.DevContext, 0, 0, OffsetX, GlobalState.WindowHeight, BLACKNESS);
-    PatBlt(GlobalState.DevContext, OffsetX + Buffer->Width, 0, GlobalState.WindowWidth, GlobalState.WindowHeight, BLACKNESS);
-    PatBlt(GlobalState.DevContext, 0, OffsetY + Buffer->Height, OffsetX + Buffer->Width, GlobalState.WindowHeight, BLACKNESS);
-
-    StretchDIBits(GlobalState.DevContext, // destination device
-                  OffsetX, OffsetY, Buffer->Width, Buffer->Height, // destination dimensions (no stretching)
-                  0, 0, Buffer->Width, Buffer->Height, // source buffer stuff
-                  Buffer->Memory,
-                  &Buffer->Info, DIB_RGB_COLORS, SRCCOPY);
-    ReleaseDC(GlobalState.Window, DevContext);
-}
-
-
-static void
-ResizeBackBuffer()
-{
-    offscreen_buffer *Buffer = &GlobalResources.BackBuffer;
+    // deallocate previous bitmap memory on size change
     if(Buffer->Memory)
     {
         VirtualFree(Buffer->Memory, 0, MEM_RELEASE);
     }
 
     // resize global bitmap dimensions
-    Buffer->Width = GlobalState.WindowWidth;
-    Buffer->Height = GlobalState.WindowHeight;
+    Buffer->Width = NewWidth;
+    Buffer->Height = NewHeight;
 
-    // filling out the BITMAPINFO struct
-    // the header is the most important
+    Buffer->BytesPerPixel = 4;	// RGBA
+    Buffer->Pitch = Buffer->Width * Buffer->BytesPerPixel;
+
+    // filling out the BITMAPINFO struct, the header is the most important
     Buffer->Info.bmiHeader.biSize = sizeof(Buffer->Info.bmiHeader);
     Buffer->Info.bmiHeader.biWidth = Buffer->Width;
-    Buffer->Info.bmiHeader.biHeight = -Buffer->Height;	// top-down scheme
-    Buffer->Info.bmiHeader.biPlanes = 1;		// no separate RGB channels
-    Buffer->Info.bmiHeader.biBitCount = 32;
+    Buffer->Info.bmiHeader.biHeight = -Buffer->Height; // top-down scheme
+    Buffer->Info.bmiHeader.biPlanes = 1; // 1 color plane, no separate RGB channels
+    Buffer->Info.bmiHeader.biBitCount = (WORD) (Buffer->BytesPerPixel * 8); // bits per pixel
     Buffer->Info.bmiHeader.biCompression = BI_RGB; // no compression
     Buffer->Info.bmiHeader.biSizeImage = 0;
     Buffer->Info.bmiHeader.biXPelsPerMeter = 0;
@@ -82,45 +40,171 @@ ResizeBackBuffer()
     Buffer->Info.bmiHeader.biClrUsed = 0;
     Buffer->Info.bmiHeader.biClrImportant = 0;
 
-    Buffer->BytesPerPixel = 4;	// RGB and Alpha
     // allocate bitmap memory
     Buffer->Memory = VirtualAlloc(0, Buffer->BytesPerPixel * Buffer->Width * Buffer->Height,
-                                  MEM_RESERVE | MEM_COMMIT,
-                                  PAGE_READWRITE);
-    Buffer->Pitch = Buffer->Width * Buffer->BytesPerPixel;
+                                  MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 }
 
+void
+UpdateWindowFromBuffer(HDC DevContext, i32 WindowWidth, i32 WindowHeight,
+                       offscreen_buffer *Buffer)
+{
+    if((WindowWidth >= Buffer->Width * 1.2) &&
+       (WindowHeight >= Buffer->Height * 1.2)) // window bigger than buffer dimensions
+    {
+        StretchDIBits(DevContext, // destination device
+                      0, 0, WindowWidth, WindowHeight, // destination dimensions (stretch to window dimensions)
+                      0, 0, Buffer->Width, Buffer->Height, // source buffer stuff
+                      Buffer->Memory, // source buffer memory
+                      &Buffer->Info,
+                      DIB_RGB_COLORS, // usage
+                      SRCCOPY); // raster operation
+    }
+    else // window same size or smaller than backbuffer
+    {
+        i32 OffsetX = 10;
+        i32 OffsetY = 10;
 
-// window callback procedure, handles windows messages
+        // paint buffer offsets inside the window with black (4 regions)
+        PatBlt(DevContext, 0, 0, WindowWidth, OffsetY, BLACKNESS);
+        PatBlt(DevContext, 0, 0, OffsetX, WindowHeight, BLACKNESS);
+        PatBlt(DevContext, OffsetX + Buffer->Width, 0, WindowWidth, WindowHeight, BLACKNESS);
+        PatBlt(DevContext, 0, OffsetY + Buffer->Height, OffsetX + Buffer->Width, WindowHeight, BLACKNESS);
+
+        StretchDIBits(
+            DevContext, // destination device
+            OffsetX, OffsetY, Buffer->Width, Buffer->Height, // destination dimensions (no stretching)
+            0, 0, Buffer->Width, Buffer->Height, // source buffer stuff
+            Buffer->Memory, // source buffer memory
+            &Buffer->Info,
+            DIB_RGB_COLORS,	// usage
+            SRCCOPY); // raster operation
+    }
+}
+
+void
+HandleKeyboardMessage(MSG Message, input_sample *Input)
+{
+    u32 VKCode = (u32) Message.wParam;
+    bool WasDown = ((Message.lParam & (1 << 30)) != 0);
+    bool IsDown = ((Message.lParam & (1 << 31)) == 0);
+    // ignore repeating messages of the same key if there's no transitions in between them
+    if(WasDown != IsDown)
+    {
+        if(VKCode == VK_UP)
+        {
+        }
+        else if(VKCode == VK_DOWN)
+        {
+        }
+        else if(VKCode == VK_LEFT)
+        {
+        }
+        else if(VKCode == VK_RIGHT)
+        {
+        }
+    }
+}
+
+void
+HandlePaintMessage(HWND Window)
+{
+    PAINTSTRUCT Paint;
+    HDC DevContext = BeginPaint(Window, &Paint);
+    RECT ClientRect;
+    GetClientRect(Window, &ClientRect);
+    UpdateWindowFromBuffer(DevContext,
+                           ClientRect.bottom - ClientRect.top,
+                           ClientRect.right - ClientRect.left,
+                           &GlobalBackBuffer);
+    EndPaint(Window, &Paint);
+}
+
+inline f32
+GetSecondsElapsed(LARGE_INTEGER Start, LARGE_INTEGER End)
+{
+    f32 Result = ((f32) (End.QuadPart - Start.QuadPart) / (f32) PerfCounterFrequency.QuadPart);
+    return(Result);
+}
+
+inline LARGE_INTEGER
+GetWallClock()
+{
+    LARGE_INTEGER Result;
+    QueryPerformanceCounter(&Result);
+    return(Result);
+}
+
+void SyncFrame(f32 TargetFramePeriod)
+{
+    f32 TimeSpentWorking = GetSecondsElapsed(LastCounter, GetWallClock());
+    // synchronizing with the target frame rate
+    f32 SecondsElapsedForFrame = TimeSpentWorking;
+    if(SecondsElapsedForFrame < TargetFramePeriod)
+    {
+        DWORD msSleep = (DWORD) (1000.0f * (TargetFramePeriod - SecondsElapsedForFrame));
+        if(msSleep > 0)
+        {
+            Sleep(msSleep);
+        }
+
+        SecondsElapsedForFrame = GetSecondsElapsed(LastCounter, GetWallClock());
+
+        if(SecondsElapsedForFrame < TargetFramePeriod)
+        {
+            // TODO: log missing a frame here
+
+        }
+
+        // spinlock for the rest of the interval
+        while(SecondsElapsedForFrame < TargetFramePeriod)
+        {
+            SecondsElapsedForFrame = GetSecondsElapsed(LastCounter, GetWallClock());
+        }
+    }
+    else
+    {
+        // we've missed a frame
+    }
+
+    // reset stats each frame
+    LastCounter = GetWallClock();
+}
+
 LRESULT CALLBACK
-MainWindowProcedure(HWND   Window,
-                    UINT   Message,
-                    WPARAM wParam,
-                    LPARAM lParam)
+WindowProc(HWND   Window,
+           UINT   Message,
+           WPARAM wParam,
+           LPARAM lParam)
 {
     LRESULT Result = 0;
     switch(Message)
     {
-        case WM_ACTIVATEAPP:
+        case WM_SIZE:
         {
-            if(wParam)
-            {
-                SetLayeredWindowAttributes(Window, RGB(0, 0, 0), 255, LWA_ALPHA);
-            }
-            else
-            {
-                SetLayeredWindowAttributes(Window, RGB(0, 0, 0), 64, LWA_ALPHA);
-            }
         } break;
-        
-        case WM_PAINT:
-        {
 
+        case WM_DESTROY:
+        {
+            GlobalRunning = false;
         } break;
 
         case WM_CLOSE:
         {
-            PostQuitMessage(0);
+            GlobalRunning = false;
+        } break;
+
+        case WM_PAINT:
+        {
+            HandlePaintMessage(Window);
+        } break;
+
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+        case WM_KEYDOWN:
+        case WM_KEYUP:
+        {
+            Assert(!"keyboard input came in through a non-dispatch message")
         } break;
 
         default:
@@ -131,96 +215,98 @@ MainWindowProcedure(HWND   Window,
     return Result;
 }
 
+void
+MessagePump(input_sample *Input)
+{
+    MSG Message;
+    while(PeekMessage(&Message, 0, 0, 0, PM_REMOVE))
+    {
+        switch(Message.message)
+        {
+            case WM_QUIT:
+            {
+                GlobalRunning = false;
+            } break;
+            case WM_SYSKEYDOWN:
+            case WM_SYSKEYUP:
+            case WM_KEYUP:
+            case WM_KEYDOWN:
+            {
+                HandleKeyboardMessage(Message, Input);
+            } break;
+            default:
+            {
+                TranslateMessage(&Message);
+                DispatchMessage(&Message);
+            } break;
+        }
+    }
+}
 
-// entry point
-int CALLBACK
+
+i32 CALLBACK
 WinMain(HINSTANCE hInstance,
         HINSTANCE hPrevInstance,
         LPSTR     lpCmdLine,
-        int       nCmdShow)
+        i32       nCmdShow)
 {
-    // ---------------
-    // create a window
-    // ---------------
-    WNDCLASSA WindowClass = {};
-    WindowClass.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
-    WindowClass.lpfnWndProc = MainWindowProcedure;
-    WindowClass.hInstance = hInstance;
-    WindowClass.lpszClassName = "MainWindowClass";
+    // initialize stuff
+    GlobalRunning = true;
+    ResizeBackBuffer(&GlobalBackBuffer, 960, 540);
+    f32 TargetFramePeriod = 1.0f / GameUpdateHz;
+    QueryPerformanceFrequency(&PerfCounterFrequency);
+    LastCounter = GetWallClock();
+    input_sample Inputs[2] = {};
+    input_sample *OldInput = &Inputs[0];
+    input_sample *NewInput = &Inputs[1];
 
-    HRESULT LastResult = RegisterClassA(&WindowClass);
-    if(FAILED(LastResult))
+    // make and register a window class
+    WNDCLASSA WindowClass = {};
+    WindowClass.style = CS_HREDRAW | CS_VREDRAW;
+    WindowClass.lpfnWndProc = WindowProc;
+    WindowClass.hInstance = hInstance;
+    WindowClass.lpszClassName = "SoftwareRendererWindowClass";
+    WindowClass.hCursor = LoadCursor(0, IDC_CROSS);
+    if(!RegisterClassA(&WindowClass))
     {
-        OutputDebugStringA("RegisterClassA() FAILED, Exiting.\n");
-        return 0;
+        Assert(0);
     }
 
-    HWND Window = CreateWindowExA(0, "MainWindowClass", "Backbuffer Experiments",
-                                  WS_VISIBLE | WS_OVERLAPPEDWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST,
+    // create a window
+    HWND Window = CreateWindowExA(0, "SoftwareRendererWindowClass", "Software Renderer",
+                                  WS_VISIBLE | WS_OVERLAPPEDWINDOW,
                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                                   CW_USEDEFAULT,
                                   0, 0, hInstance, 0);
     if(!Window)
     {
-        OutputDebugStringA("CreateWindowExA() FAILED, Exiting.\n");
-        return 0;
+        Assert(0);
     }
-    SetWindowPos(Window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 
-    //-----------------------
-    // create a bitmap buffer
-    //-----------------------
-    RECT ClientRect;
-    GetClientRect(Window, &ClientRect);
-    GlobalState.WindowHeight = ClientRect.bottom - ClientRect.top;
-    GlobalState.WindowWidth = ClientRect.right - ClientRect.left;
-    GlobalState.Window = Window;
-    ResizeBackBuffer();
-
-
-    // --------------
-    // main game loop
-    // --------------
-    game *Game = GameInit();
-    bool Running = true;
-    bool Pause = false;
-    while(Running)
+    // enter game loop
+    while(GlobalRunning)
     {
-        // -------------------
-        // handle all messages
-        // -------------------
-        MSG Message;
-        while(PeekMessage(&Message, 0, 0, 0, PM_REMOVE))
-        {
-            switch(Message.message)
-            {
-                case WM_QUIT:
-                {
-                    return (int) Message.wParam;
-                } break;
-                
-                default:
-                {
-                    TranslateMessage(&Message);
-                    DispatchMessage(&Message);
-                } break;
-            }          
-        }
+        // handle all window messages
+        MessagePump(NewInput);
 
-        if(!Pause)
-        {
-            // ------------
-            // update state
-            // ------------
-            Game->UpdateGameState();
-        }
+        RendererStateUpdate(OldInput, NewInput, TargetFramePeriod); // update internal renderer state
+        RendererRenderFrame(&GlobalBackBuffer); // render scene on backbuffer
 
+        // swap input objects
+        input_sample *Temp = OldInput;
+        OldInput = NewInput;
+        NewInput = Temp;
 
-        // ------------
-        // render frame
-        // ------------
-        UpdateWindowFromBuffer();
+        SyncFrame(TargetFramePeriod); // sleep the rest of the frame to sync 
+
+        // frame flip
+        HDC DevContext = GetDC(Window);
+        RECT ClientRect;
+        GetClientRect(Window, &ClientRect);
+        UpdateWindowFromBuffer(DevContext,
+                               ClientRect.bottom - ClientRect.top,
+                               ClientRect.right - ClientRect.left,
+                               &GlobalBackBuffer);
     }
-
-    return(0);
 }
+
