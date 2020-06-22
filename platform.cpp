@@ -30,7 +30,7 @@ ResizeBackBuffer(offscreen_buffer *Buffer,
     // filling out the BITMAPINFO struct, the header is the most important
     Buffer->Info.bmiHeader.biSize = sizeof(Buffer->Info.bmiHeader);
     Buffer->Info.bmiHeader.biWidth = Buffer->Width;
-    Buffer->Info.bmiHeader.biHeight = -Buffer->Height; // top-down scheme
+    Buffer->Info.bmiHeader.biHeight = -(i32) Buffer->Height; // top-down scheme
     Buffer->Info.bmiHeader.biPlanes = 1; // 1 color plane, no separate RGB channels
     Buffer->Info.bmiHeader.biBitCount = (WORD) (Buffer->BytesPerPixel * 8); // bits per pixel
     Buffer->Info.bmiHeader.biCompression = BI_RGB; // no compression
@@ -83,6 +83,16 @@ UpdateWindowFromBuffer(HDC DevContext, i32 WindowWidth, i32 WindowHeight,
 }
 
 void
+ProcessKeyboardButton(button_state *NewState, bool IsDown)
+{
+    if(NewState->EndedDown != IsDown)
+    {
+        NewState->EndedDown = IsDown;
+        ++NewState->HalfTransitionCount;
+    }
+}
+
+void
 HandleKeyboardMessage(MSG Message, input_sample *Input)
 {
     u32 VKCode = (u32) Message.wParam;
@@ -93,15 +103,19 @@ HandleKeyboardMessage(MSG Message, input_sample *Input)
     {
         if(VKCode == VK_UP)
         {
+            ProcessKeyboardButton(&Input->MoveUp, IsDown);
         }
         else if(VKCode == VK_DOWN)
         {
+            ProcessKeyboardButton(&Input->MoveDown, IsDown);
         }
         else if(VKCode == VK_LEFT)
         {
+            ProcessKeyboardButton(&Input->MoveLeft, IsDown);
         }
         else if(VKCode == VK_RIGHT)
         {
+            ProcessKeyboardButton(&Input->MoveRight, IsDown);
         }
     }
 }
@@ -259,6 +273,8 @@ WinMain(HINSTANCE hInstance,
     input_sample Inputs[2] = {};
     input_sample *OldInput = &Inputs[0];
     input_sample *NewInput = &Inputs[1];
+    renderer_state RendererState = {};
+    InitializeRendererState(&RendererState);
 
     // make and register a window class
     WNDCLASSA WindowClass = {};
@@ -289,13 +305,13 @@ WinMain(HINSTANCE hInstance,
         // handle all window messages
         MessagePump(NewInput);
 
-        RendererStateUpdate(OldInput, NewInput, TargetFramePeriod); // update internal renderer state
-        RendererRenderFrame(&GlobalBackBuffer); // render scene on backbuffer
+        RendererStateUpdate(OldInput, NewInput, TargetFramePeriod, &RendererState); // update internal renderer state
+        RendererRenderFrame(&GlobalBackBuffer, &RendererState); // render scene on backbuffer
 
         // swap input objects
-        input_sample *Temp = OldInput;
+        /*input_sample *Temp = OldInput;
         OldInput = NewInput;
-        NewInput = Temp;
+        NewInput = Temp;*/
 
         SyncFrame(TargetFramePeriod); // sleep the rest of the frame to sync 
 
